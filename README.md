@@ -1,140 +1,262 @@
 # rapidGraph
 
-`rapidGraph` is a local-first, open-domain text-to-graph extractor for arbitrary text. It turns raw text files or inline text into structured JSON containing:
+`rapidGraph` is a local-first, open-domain text-to-graph extractor for arbitrary text. It reads inline text or one or more `.txt` files and produces a structured graph-oriented JSON payload with:
 
 - `entities`
 - `relations`
 - `potential_schema`
 - `expanded_schema`
-- provenance-aware `documents`, `chunks`, and `relation_support`
+- `documents`
+- `chunks`
+- `relation_support`
+- `meta`
 
-It is designed for:
+The package is designed for:
 
-- general entity and relation extraction across business, technical, scientific, and mixed-topic text
-- CPU-friendly local runs with selectable quality modes
-- provenance-aware graph building for future RAG or GraphRAG pipelines
-- optional direct Neo4j ingestion
+- entity and relation extraction across general, technical, scientific, and mixed-domain text
+- CPU-friendly local execution
+- provenance-aware graph construction
+- future GraphRAG / RAG workflows
+- optional Neo4j ingestion
 
-The public distribution name is `rapidGraph`, the Python import package is `rapidgraph`, and the installed CLI command is `rapidgraph`.
+The public package name is `rapidGraph`, the import package is `rapidgraph`, and the installed CLI command is `rapidgraph`.
 
-## What It Does
+## Table of Contents
 
-At a high level, `rapidGraph`:
+- [What rapidGraph Does](#what-rapidgraph-does)
+- [Key Capabilities](#key-capabilities)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [How the Pipeline Works](#how-the-pipeline-works)
+- [Execution Modes](#execution-modes)
+- [Input Model](#input-model)
+- [Output Model](#output-model)
+- [CLI Reference](#cli-reference)
+- [Recommended Flag Combinations](#recommended-flag-combinations)
+- [Neo4j Export Model](#neo4j-export-model)
+- [Python Library Usage](#python-library-usage)
+- [Performance and Practical Notes](#performance-and-practical-notes)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Publishing](#publishing)
+- [License](#license)
 
-1. normalizes raw text
-2. splits it into chunked spans
+## What rapidGraph Does
+
+At a high level, `rapidGraph` takes arbitrary text and turns it into a graph-friendly representation.
+
+The pipeline:
+
+1. normalizes input text
+2. splits text into chunked spans
 3. extracts entity candidates
 4. extracts relation candidates
-5. canonicalizes duplicate or near-duplicate entity mentions
-6. links relation endpoints back to canonical entities
-7. infers schema patterns from the final graph
-8. preserves chunk/document provenance for downstream graph and retrieval use
+5. canonicalizes duplicate or near-duplicate mentions
+6. links relation endpoints to canonical entities
+7. infers schema patterns from the accepted graph edges
+8. stores document and chunk provenance so every entity mention and relation can be traced back to source text
 
-The extractor is open-domain best effort. It does not enforce a fixed ontology and keeps `Unknown` types when typing confidence is weak.
+The extractor is open-domain and best-effort. It does not rely on a fixed business-only ontology. If typing confidence is weak, it keeps entities as `Unknown` rather than discarding them.
 
-## Core Features
+## Key Capabilities
 
 - Open-domain entity extraction
 - Open-domain relation extraction
-- Schema inference from observed graph edges
-- Provenance-aware output with `documents`, `chunks`, and relation support records
+- Schema inference from extracted graph edges
+- Provenance-aware output using `documents`, `chunks`, and `relation_support`
 - Multi-file corpus ingestion in one run
-- Two canonicalization scopes:
-  - `document`: keep each file independent
-  - `corpus`: merge compatible entities across files
-- Three CPU-aware execution modes:
+- Two entity canonicalization scopes:
+  - `document`
+  - `corpus`
+- Three execution modes:
   - `fast`
   - `balanced`
   - `quality`
-- Optional embedding-assisted canonicalization and linking
+- Optional embedding-assisted entity merging and relation endpoint linking
 - Optional Neo4j export
+- Backward-compatible `potential_schema` plus richer `expanded_schema`
 
-## Install
+## Installation
 
-Install from source:
-
-```bash
-pip install .
-```
-
-Install with optional extras:
-
-```bash
-pip install ".[neo4j]"
-pip install ".[embeddings]"
-pip install ".[dev]"
-pip install ".[neo4j,embeddings,dev]"
-```
-
-After publishing to PyPI, users will be able to install with:
+### Install from PyPI
 
 ```bash
 pip install rapidGraph
 ```
 
-PyPI extras will work the same way:
+### Install with optional extras
+
+Neo4j support:
 
 ```bash
 pip install "rapidGraph[neo4j]"
+```
+
+Embedding-assisted linking:
+
+```bash
 pip install "rapidGraph[embeddings]"
+```
+
+Development tooling:
+
+```bash
 pip install "rapidGraph[dev]"
 ```
 
-## CLI Quick Start
+Everything:
 
-Show help:
+```bash
+pip install "rapidGraph[neo4j,embeddings,dev]"
+```
+
+### Install from source
+
+```bash
+pip install .
+```
+
+Or with extras:
+
+```bash
+pip install ".[neo4j,embeddings,dev]"
+```
+
+## Quick Start
+
+Show CLI help:
 
 ```bash
 rapidgraph --help
 ```
 
-Process inline text:
+Extract from inline text:
 
 ```bash
 rapidgraph --text "Google is based in California." --pretty
 ```
 
-Process one file:
+Extract from a file:
 
 ```bash
 rapidgraph --input input.txt --pretty
 ```
 
-Process multiple files:
+Extract from multiple files:
 
 ```bash
 rapidgraph --input input.txt input2.txt --pretty
 ```
 
-Write output to JSON:
+Write JSON to a file:
 
 ```bash
 rapidgraph --input input.txt --output graph.json --pretty
 ```
 
-The repo-root compatibility command still works:
+The repo-root compatibility shim also works:
 
 ```bash
 python extract_graph.py --input input.txt --pretty
 ```
 
+## How the Pipeline Works
+
+### 1. Text normalization
+
+The input is normalized for whitespace and line ending consistency before extraction begins.
+
+### 2. Chunking
+
+The extractor splits text into chunks before model inference. Chunking exists because relation and entity models work better on bounded spans than on arbitrarily long documents.
+
+Two chunking strategies are available:
+
+- `paragraph`
+  - default
+  - respects paragraph and block boundaries first
+  - better for preserving local structure
+- `sentence`
+  - simpler sentence packing
+  - useful for experimentation or tighter chunk control
+
+Optional overlap preserves context across chunk boundaries.
+
+### 3. Entity extraction
+
+Entities are primarily extracted with GLiNER, with heuristic fallback and supplemental heuristics used where useful.
+
+### 4. Relation extraction
+
+Relations come from a combination of:
+
+- heuristic relation extraction
+- context-based relation patterns
+- optional REBEL relation extraction
+
+The amount of REBEL usage depends on `--mode`.
+
+### 5. Canonicalization
+
+Mentions are merged into canonical entities using:
+
+- normalized string matching
+- fuzzy matching
+- optional embedding-assisted rescue for borderline cases
+
+### 6. Relation linking
+
+Relation endpoints are linked back to canonical entity IDs using:
+
+- exact and local mention-aware matching first
+- fuzzy matching second
+- optional embedding-assisted rescue last
+
+### 7. Schema generation
+
+Two schema views are produced:
+
+- `potential_schema`
+  - strict compatibility view
+  - grouped by `(source_type, relation, target_type)`
+- `expanded_schema`
+  - richer view using more refined type groupings
+  - keeps more semantic detail
+
+### 8. Provenance capture
+
+Each mention and accepted relation can be traced to:
+
+- a `document`
+- one or more `chunks`
+- representative evidence text
+
+This is what makes the model usable later for retrieval or graph-backed answer generation.
+
 ## Execution Modes
 
-`rapidGraph` supports three relation extraction modes.
+`rapidGraph` supports three runtime modes.
 
 ### `fast`
 
 Best for:
 
 - CPU-only quick passes
-- bulk experiments
-- basic graph drafts
+- rapid iteration
+- rough graph drafts
 
 Behavior:
 
-- uses GLiNER and heuristics
+- uses GLiNER plus heuristics
 - does not run REBEL
-- fastest startup and lowest CPU cost
+- lowest startup cost
+- lowest relation recall of the three modes
+
+Example:
+
+```bash
+rapidgraph --input input.txt --mode fast --pretty
+```
 
 ### `balanced`
 
@@ -142,44 +264,59 @@ This is the default mode.
 
 Best for:
 
-- normal CPU usage
-- better relation quality without full model cost
+- most local CPU runs
+- practical relation quality without paying the full REBEL cost
 
 Behavior:
 
-- runs heuristics everywhere
+- runs heuristic relations everywhere
 - runs REBEL only on shortlisted high-value spans
-- usually the best tradeoff
+- usually the best speed/quality tradeoff
+
+Example:
+
+```bash
+rapidgraph --input input.txt --mode balanced --pretty
+```
 
 ### `quality`
 
 Best for:
 
-- maximum relation recall
 - slower offline analysis
-- smaller corpora where quality matters more than throughput
+- smaller corpora
+- maximum relation recall
 
 Behavior:
 
 - runs REBEL across all chunks
 - highest model cost
+- typically the slowest mode
+
+Example:
+
+```bash
+rapidgraph --input input.txt --mode quality --pretty
+```
 
 ## Input Model
 
-The CLI accepts either:
+The CLI accepts exactly one of:
 
 - `--text "..."` for inline text
-- `--input file1.txt [file2.txt ...]` for one or more text files
+- `--input file1.txt [file2.txt ...]` for file input
 
 `--text` and `--input` are mutually exclusive.
 
+Multi-file ingestion produces a single combined JSON result with multiple `documents` and `chunks`.
+
 ## Output Model
 
-The extractor returns one combined JSON object with these top-level fields.
+The extractor returns a single JSON object.
 
 ### `entities`
 
-Each entity includes:
+Each entity contains:
 
 - `id`
 - `text`
@@ -188,7 +325,7 @@ Each entity includes:
 - `confidence`
 - `mentions`
 
-Each mention includes:
+Each mention contains:
 
 - `text`
 - `start`
@@ -199,7 +336,7 @@ Each mention includes:
 
 ### `relations`
 
-Each relation includes:
+Each relation contains:
 
 - `source_id`
 - `target_id`
@@ -211,19 +348,19 @@ Each relation includes:
 
 ### `potential_schema`
 
-Strict schema aggregation using:
+Strict schema aggregation. This preserves backward compatibility and groups edges by:
 
-- `(source_type, relation, target_type)`
-
-This is the backward-compatible schema view.
+- `source_type`
+- `relation`
+- `target_type`
 
 ### `expanded_schema`
 
-Richer schema aggregation using finer-grained normalized types and more examples.
+Richer schema aggregation that retains more type detail and gives a broader schema view than `potential_schema`.
 
 ### `documents`
 
-One document row per input source:
+One row per input document:
 
 - `id`
 - `source`
@@ -233,12 +370,12 @@ One document row per input source:
 
 ### `chunks`
 
-Each chunk includes:
+One row per extraction chunk:
 
 - `id`
 - `document_id`
 - `index`
-- `text` unless omitted
+- `text`
 - `start`
 - `end`
 - `block_index`
@@ -246,7 +383,7 @@ Each chunk includes:
 
 ### `relation_support`
 
-One row per final relation edge with merged provenance:
+One row per final accepted relation edge with merged provenance:
 
 - `source_id`
 - `relation`
@@ -257,20 +394,74 @@ One row per final relation edge with merged provenance:
 
 ### `meta`
 
-Includes model names, thresholds, chunk counts, mode, embedding stats, relation backend stats, warnings, and processing time.
+Contains execution metadata such as:
 
-## Flag Reference
+- model names
+- thresholds
+- chunk count
+- elapsed time
+- mode
+- relation backend strategy
+- REBEL usage counts
+- embedding usage counts
+- warning list
+- fallback indicator
 
-### Input and Output Flags
+### Example output shape
+
+```json
+{
+  "entities": [
+    {
+      "id": "E1",
+      "text": "Google",
+      "canonical": "Google",
+      "type": "Organization",
+      "confidence": 0.91,
+      "mentions": [
+        {
+          "text": "Google",
+          "start": 0,
+          "end": 6,
+          "chunk_index": 0,
+          "document_id": "D1",
+          "chunk_id": "D1:C0"
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "source_id": "E1",
+      "target_id": "E2",
+      "relation": "IS_BASED_IN",
+      "confidence": 0.78,
+      "evidence": "Google is based in California.",
+      "chunk_ids": ["D1:C0"],
+      "document_ids": ["D1"]
+    }
+  ],
+  "potential_schema": [],
+  "expanded_schema": [],
+  "documents": [],
+  "chunks": [],
+  "relation_support": [],
+  "meta": {}
+}
+```
+
+## CLI Reference
+
+### Input and output
 
 #### `--text TEXT`
 
-Inline text input.
+Inline text to process.
 
 Example:
 
 ```bash
-rapidgraph --text "Transformer uses self-attention." --pretty
+rapidgraph --text "Transformer uses attention." --pretty
 ```
 
 #### `--input INPUT [INPUT ...]`
@@ -298,91 +489,43 @@ rapidgraph --input input.txt --output graph.json --pretty
 
 Pretty-print JSON output.
 
-## Quality and Runtime Flags
+### Thresholds and chunking
 
-#### `--mode {fast,balanced,quality}`
+#### `--entity-threshold`
 
-Controls the CPU and quality tradeoff.
+Default: `0.35`
 
-Examples:
+Minimum confidence for keeping entity candidates.
 
-```bash
-rapidgraph --input input.txt --mode fast
-rapidgraph --input input.txt --mode balanced
-rapidgraph --input input.txt --mode quality
-```
+#### `--relation-threshold`
 
-#### `--disable-rebel`
+Default: `0.2`
 
-Forces heuristic-only relation extraction even if the mode would otherwise use REBEL.
+Minimum confidence for keeping relation candidates.
 
-Example:
+#### `--max-chars`
 
-```bash
-rapidgraph --input input.txt --mode quality --disable-rebel
-```
+Default: `600`
 
-#### `--max-model-spans MAX_MODEL_SPANS`
+Approximate chunk size budget.
 
-Only used meaningfully in `balanced` mode. Caps the number of shortlisted spans sent to REBEL.
+Higher values:
 
-Example:
-
-```bash
-rapidgraph --input input.txt --mode balanced --max-model-spans 6
-```
-
-## Extraction Threshold Flags
-
-#### `--entity-threshold ENTITY_THRESHOLD`
-
-Minimum confidence used to keep entity candidates.
-
-Example:
-
-```bash
-rapidgraph --input input.txt --entity-threshold 0.45
-```
-
-#### `--relation-threshold RELATION_THRESHOLD`
-
-Minimum confidence used to keep relations.
-
-Example:
-
-```bash
-rapidgraph --input input.txt --relation-threshold 0.3
-```
-
-#### `--max-chars MAX_CHARS`
-
-Chunk size budget. Larger values preserve more context but cost more runtime.
-
-Example:
-
-```bash
-rapidgraph --input input.txt --max-chars 1400
-```
-
-## Chunking Flags
+- preserve more context
+- may improve some relations
+- increase compute cost
 
 #### `--chunk-mode {paragraph,sentence}`
 
+Default: `paragraph`
+
 Controls chunk construction.
 
-- `paragraph`: structure-aware paragraph-first chunking
-- `sentence`: simpler sentence packing
+#### `--chunk-overlap`
 
-Example:
+Default: `1`
 
-```bash
-rapidgraph --input input.txt --chunk-mode paragraph
-rapidgraph --input input.txt --chunk-mode sentence
-```
-
-#### `--chunk-overlap CHUNK_OVERLAP`
-
-Sentence overlap between neighboring chunks. Higher values preserve context across chunk boundaries but increase redundancy.
+Number of overlapping sentences preserved between neighboring chunks.
 
 Example:
 
@@ -390,14 +533,55 @@ Example:
 rapidgraph --input input.txt --chunk-overlap 2
 ```
 
-## Multi-File and Canonicalization Flags
+### Runtime mode and relation strategy
+
+#### `--mode {fast,balanced,quality}`
+
+Default: `balanced`
+
+Controls the speed/quality tradeoff.
+
+#### `--max-model-spans`
+
+Default: `4`
+
+Balanced-mode only. Caps how many shortlisted spans go through REBEL.
+
+Example:
+
+```bash
+rapidgraph --input input.txt --mode balanced --max-model-spans 6
+```
+
+#### `--disable-rebel`
+
+Force heuristic-only relation extraction regardless of mode.
+
+Example:
+
+```bash
+rapidgraph --input input.txt --mode quality --disable-rebel
+```
+
+### Entity canonicalization scope
 
 #### `--entity-scope {document,corpus}`
 
-Controls how entities are canonicalized across multiple files.
+Default: `document`
 
-- `document`: identical entities in different files stay separate
-- `corpus`: compatible entities can merge across files
+Controls whether compatible entities can merge across files.
+
+Use `document` when:
+
+- files are independent
+- names may be ambiguous across documents
+- you want safer graph boundaries
+
+Use `corpus` when:
+
+- the files describe the same topic or domain
+- you want one merged entity layer across the corpus
+- you are building a shared graph for Neo4j or GraphRAG
 
 Examples:
 
@@ -406,31 +590,71 @@ rapidgraph --input input.txt input2.txt --entity-scope document
 rapidgraph --input input.txt input2.txt --entity-scope corpus
 ```
 
-Use `document` when:
+### Embedding-assisted linking
 
-- document-local provenance matters most
-- names are ambiguous across files
-- you want a safer default
+These flags are optional. They are not enabled by default.
 
-Use `corpus` when:
+#### `--embedding-linking`
 
-- the files are about a shared topic
-- you want a consolidated graph across the corpus
-- you plan to export one merged graph to Neo4j
+Enable embedding-assisted rescue for ambiguous entity merges and unresolved relation endpoints.
 
-## Provenance Flags
+#### `--embedding-model`
+
+Default:
+
+```text
+sentence-transformers/all-MiniLM-L6-v2
+```
+
+#### `--embedding-threshold`
+
+Default: `0.84`
+
+Cosine similarity threshold for accepting embedding-assisted merge or link candidates.
+
+#### `--embedding-cache-dir`
+
+Default:
+
+```text
+.cache/extract_graph_embeddings
+```
+
+Embedding vectors are cached locally in SQLite form.
+
+#### `--embedding-max-candidates`
+
+Default: `8`
+
+Maximum number of candidates considered in embedding-assisted linking for an unresolved mention.
+
+Example:
+
+```bash
+rapidgraph \
+  --input input.txt input2.txt \
+  --entity-scope corpus \
+  --embedding-linking \
+  --embedding-threshold 0.84 \
+  --embedding-max-candidates 8 \
+  --pretty
+```
+
+### Provenance controls
 
 #### `--include-chunk-text`
 
-Include full chunk text in the `chunks` array. This is the default.
+Default: enabled
+
+Include chunk text inside the `chunks` array.
 
 #### `--no-include-chunk-text`
 
-Keep chunk records but omit chunk text.
+Omit chunk text while keeping chunk metadata.
 
 #### `--omit-provenance-text`
 
-Alias for omitting chunk text while preserving chunk IDs and metadata.
+Alias for omitting chunk text while preserving chunk IDs and provenance structure.
 
 Examples:
 
@@ -439,79 +663,37 @@ rapidgraph --input input.txt --no-include-chunk-text
 rapidgraph --input input.txt --omit-provenance-text
 ```
 
-## Embedding-Assisted Linking Flags
+### Neo4j export
 
-These are opt-in. They are not enabled by default.
+These flags are optional. Without them, the CLI only prints or writes JSON.
 
-#### `--embedding-linking`
+#### `--neo4j-uri`
 
-Enable embedding-assisted rescue for ambiguous entity merges and unresolved relation endpoints.
-
-#### `--embedding-model EMBEDDING_MODEL`
-
-Sentence embedding model to use. Default:
-
-```text
-sentence-transformers/all-MiniLM-L6-v2
-```
-
-#### `--embedding-threshold EMBEDDING_THRESHOLD`
-
-Cosine similarity threshold for accepting embedding-based merges or links.
-
-#### `--embedding-cache-dir EMBEDDING_CACHE_DIR`
-
-Local cache directory for embedding vectors.
-
-#### `--embedding-max-candidates EMBEDDING_MAX_CANDIDATES`
-
-Caps the candidate pool used during embedding-assisted linking.
-
-Examples:
-
-```bash
-rapidgraph \
-  --input input.txt \
-  --embedding-linking \
-  --embedding-threshold 0.84 \
-  --embedding-cache-dir .cache/extract_graph_embeddings
-```
-
-```bash
-rapidgraph \
-  --input input.txt input2.txt \
-  --entity-scope corpus \
-  --embedding-linking \
-  --embedding-max-candidates 8
-```
-
-## Neo4j Flags
-
-These flags are optional. If omitted, the extractor only emits JSON.
-
-#### `--neo4j-uri NEO4J_URI`
-
-Neo4j URI such as:
+Neo4j URI, for example:
 
 ```text
 neo4j://127.0.0.1:7687
 ```
 
-#### `--neo4j-user NEO4J_USER`
+#### `--neo4j-user`
 
 Neo4j username.
 
-#### `--neo4j-password NEO4J_PASSWORD`
+#### `--neo4j-password`
 
 Neo4j password.
 
-#### `--neo4j-database NEO4J_DATABASE`
+#### `--neo4j-database`
 
-Target Neo4j database name.
+Default: `neo4j`
+
+Neo4j database name.
 
 #### `--neo4j-clean-document`
 
-Delete matching document subgraphs before re-ingesting them. Useful when rerunning the same document set.
+Deletes matching document subgraphs before re-ingesting them.
+
+Useful when rerunning the same files and you do not want duplicate document/chunk subgraphs.
 
 Example:
 
@@ -527,9 +709,11 @@ rapidgraph \
   --neo4j-clean-document
 ```
 
-## Logging Flag
+### Logging
 
 #### `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`
+
+Default: `WARNING`
 
 Controls CLI log verbosity.
 
@@ -541,7 +725,7 @@ rapidgraph --input input.txt --log-level DEBUG
 
 ## Recommended Flag Combinations
 
-### Quick CPU pass
+### Fastest CPU pass
 
 ```bash
 rapidgraph --input input.txt --mode fast --pretty
@@ -553,13 +737,13 @@ rapidgraph --input input.txt --mode fast --pretty
 rapidgraph --input input.txt --mode balanced --pretty
 ```
 
-### Higher recall on one document
+### Higher-recall single document run
 
 ```bash
 rapidgraph --input input.txt --mode quality --chunk-overlap 2 --pretty
 ```
 
-### Multi-file corpus graph
+### Multi-file corpus merge
 
 ```bash
 rapidgraph \
@@ -569,7 +753,7 @@ rapidgraph \
   --pretty
 ```
 
-### Multi-file corpus with stronger cross-file merging
+### Multi-file corpus with stronger ambiguous-link rescue
 
 ```bash
 rapidgraph \
@@ -580,7 +764,7 @@ rapidgraph \
   --pretty
 ```
 
-### Lean provenance payload
+### Smaller provenance payload
 
 ```bash
 rapidgraph \
@@ -589,7 +773,7 @@ rapidgraph \
   --pretty
 ```
 
-### Neo4j export with replacement of existing document graph
+### Neo4j ingestion with document replacement
 
 ```bash
 rapidgraph \
@@ -603,14 +787,44 @@ rapidgraph \
   --neo4j-clean-document
 ```
 
+## Neo4j Export Model
+
+When Neo4j export is enabled, the graph currently uses:
+
+Node labels:
+
+- `Document`
+- `Chunk`
+- `Entity`
+
+Relationship types:
+
+- `HAS_CHUNK`
+- `MENTIONS`
+- `RELATES_TO`
+
+Important detail:
+
+- the semantic edge label such as `IS_BASED_IN`, `USES`, or `DERIVED_FROM` is stored as a property on `RELATES_TO`
+- this is why Neo4j Browser may show many `RELATES_TO` relationships while the actual semantic relation name is visible in `r.relation`
+
+Example query:
+
+```cypher
+MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
+RETURN s.text, r.relation, t.text, r.evidence
+ORDER BY r.relation
+```
+
 ## Python Library Usage
 
-Basic usage:
+### Basic usage
 
 ```python
 from rapidgraph import DocumentInput, build_default_extractor
 
 extractor = build_default_extractor(mode="balanced")
+
 result = extractor.extract_documents(
     [
         DocumentInput(
@@ -619,7 +833,7 @@ result = extractor.extract_documents(
             title="one.txt",
         ),
         DocumentInput(
-            text="Google hired Sundar Pichai.",
+            text="Sundar Pichai leads Google.",
             source="two.txt",
             title="two.txt",
         ),
@@ -630,27 +844,162 @@ result = extractor.extract_documents(
 print(result.model_dump())
 ```
 
-## Neo4j Graph Shape
+### Single-document usage
 
-When Neo4j export is enabled, the graph is designed to remain compatible with future GraphRAG workflows.
+```python
+from rapidgraph import build_default_extractor
 
-Current node labels:
+extractor = build_default_extractor(mode="fast")
+result = extractor.extract(
+    "Transformer uses multi-head attention.",
+    include_chunk_text=True,
+)
 
-- `Document`
-- `Chunk`
-- `Entity`
+print(result.model_dump_json(indent=2))
+```
 
-Current relationship types:
+### Configurable extractor construction
 
-- `HAS_CHUNK`
-- `MENTIONS`
-- `RELATES_TO`
+```python
+from rapidgraph import build_default_extractor
 
-The semantic relation name is stored as a property on `RELATES_TO`, which is why Neo4j Browser shows one relationship type while preserving relation semantics in properties.
+extractor = build_default_extractor(
+    max_chars=800,
+    chunk_mode="paragraph",
+    chunk_overlap=2,
+    mode="balanced",
+    max_model_spans=6,
+    embedding_linking=True,
+)
+```
 
-## Packaging
+### Python library usage with Neo4j export
 
-Build distributions:
+This example extracts a graph in Python and then writes it directly to Neo4j.
+
+```python
+from rapidgraph import build_default_extractor, export_graph_to_neo4j
+
+extractor = build_default_extractor(
+    mode="balanced",
+    chunk_mode="paragraph",
+    chunk_overlap=1,
+)
+
+result = extractor.extract(
+    """
+    Google is based in California.
+    Sundar Pichai leads Google.
+    """,
+    entity_scope="document",
+    include_chunk_text=True,
+)
+
+export_graph_to_neo4j(
+    result,
+    uri="neo4j://127.0.0.1:7687",
+    user="neo4j",
+    password="12345678",
+    database="neo4j",
+    clean_document=True,
+)
+```
+
+If you want to use the Neo4j helper, install the extra first:
+
+```bash
+pip install "rapidGraph[neo4j]"
+```
+
+## Performance and Practical Notes
+
+### CPU expectations
+
+- `fast` is the cheapest mode
+- `balanced` is usually the best practical CPU choice
+- `quality` may be significantly slower because it runs REBEL on every chunk
+
+### First-run cost
+
+The first run may be slower because model weights may need to be loaded or downloaded.
+
+### Hugging Face access
+
+Some backends download models from the Hugging Face Hub if they are not already present locally.
+
+Optional environment variables:
+
+- `HF_TOKEN`
+  - useful for higher rate limits
+- `HF_HUB_OFFLINE=1`
+  - useful if models are already cached locally and you want fully offline behavior
+
+### Why chunking matters
+
+Chunking directly affects:
+
+- relation recall
+- context preservation
+- runtime
+- schema richness
+
+Too-small chunks can lose relation context. Too-large chunks can increase noise and runtime. `paragraph` mode with a small overlap is a good default.
+
+## Troubleshooting
+
+### `rapidgraph` command not found
+
+Make sure the package is installed in the active environment:
+
+```bash
+pip install rapidGraph
+```
+
+### Slow first run
+
+Expected if models are being downloaded or loaded for the first time.
+
+### Hugging Face warnings
+
+Warnings about unauthenticated requests are not fatal. Set `HF_TOKEN` if you want authenticated Hub access.
+
+### Real PyPI vs TestPyPI
+
+To install from TestPyPI:
+
+```bash
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple rapidGraph
+```
+
+For the public release:
+
+```bash
+pip install rapidGraph
+```
+
+### Neo4j shows only `RELATES_TO`
+
+That is expected. The semantic relationship name is stored in the `relation` property, not as a separate Neo4j relationship type.
+
+### Why `expanded_schema` can be larger than `potential_schema`
+
+`potential_schema` is intentionally strict and compatibility-focused. `expanded_schema` preserves finer type detail and therefore often contains more rows.
+
+## Development
+
+Install development dependencies:
+
+```bash
+pip install ".[dev]"
+```
+
+Run the main test suite:
+
+```bash
+pytest -q tests/test_extract_graph.py
+```
+
+Build the package:
 
 ```bash
 python -m build
@@ -662,45 +1011,24 @@ Validate package metadata:
 python -m twine check dist/*
 ```
 
-Install from a built wheel:
+## Publishing
+
+### TestPyPI
 
 ```bash
-pip install dist/rapidgraph-0.1.0-py3-none-any.whl
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple rapidGraph
 ```
 
-## Publishing to PyPI
-
-Create a PyPI account, generate an API token, then upload:
-
-```bash
-python -m twine upload dist/*
-```
-
-If the `rapidGraph` name is accepted on PyPI, users will be able to install with:
+### Real PyPI
 
 ```bash
 pip install rapidGraph
 ```
 
-## Development
+This repository includes GitHub Actions workflows for:
 
-Install dev dependencies:
-
-```bash
-pip install ".[dev]"
-```
-
-Run tests:
-
-```bash
-pytest -q tests/test_extract_graph.py
-```
-
-Build the package:
-
-```bash
-python -m build
-```
+- TestPyPI publishing
+- real PyPI publishing
 
 ## License
 
