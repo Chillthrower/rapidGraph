@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rapidGraph"
+version = "0.1.0"
+description = "Open-domain text-to-graph extractor with entities, relations, schema inference, and Neo4j export."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "rapidGraph contributors" }
+]
+dependencies = [
+  "gliner",
+  "pydantic",
+  "rapidfuzz",
+  "spacy",
+  "torch",
+  "transformers",
+]
+
+[project.optional-dependencies]
+neo4j = [
+  "neo4j",
+]
+embeddings = [
+  "sentence-transformers",
+]
+dev = [
+  "build",
+  "pytest",
+  "twine",
+]
+
+[project.scripts]
+rapidgraph = "rapidgraph.cli:main"
+
+[tool.setuptools]
+packages = ["rapidgraph"]
+
+[tool.setuptools.package-data]
+rapidgraph = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

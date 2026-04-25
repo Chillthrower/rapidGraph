@@ -1,0 +1,8 @@
+spacy
+gliner
+transformers
+torch
+pydantic
+rapidfuzz
+sentence-transformers
+neo4j
