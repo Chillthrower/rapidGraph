@@ -1398,6 +1398,55 @@ def export_graph_to_neo4j(
             close()
 
 
+class Neo4jGraphWriter:
+    def __init__(
+        self,
+        *,
+        uri: str,
+        user: str,
+        password: str,
+        database: str = "neo4j",
+        vector_index_name: str = "rapidgraph_chunk_embedding",
+        embedding_property: str = "embedding",
+        chunk_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        driver_factory: Any | None = None,
+        embedding_backend: EmbeddingBackend | None = None,
+    ):
+        self.uri = uri
+        self.user = user
+        self.password = password
+        self.database = database
+        self.vector_index_name = vector_index_name
+        self.embedding_property = embedding_property
+        self.chunk_embedding_model = chunk_embedding_model
+        self.driver_factory = driver_factory
+        self.embedding_backend = embedding_backend
+
+    def write(
+        self,
+        result: GraphExtraction,
+        *,
+        clean_document: bool = False,
+        embed_chunks: bool = False,
+        create_vector_index: bool = False,
+    ) -> None:
+        export_graph_to_neo4j(
+            result,
+            uri=self.uri,
+            user=self.user,
+            password=self.password,
+            database=self.database,
+            clean_document=clean_document,
+            embed_chunks=embed_chunks,
+            create_vector_index=create_vector_index,
+            vector_index_name=self.vector_index_name,
+            embedding_property=self.embedding_property,
+            chunk_embedding_model=self.chunk_embedding_model,
+            embedding_backend=self.embedding_backend,
+            driver_factory=self.driver_factory,
+        )
+
+
 @lru_cache(maxsize=1)
 def get_sentence_splitter():
     nlp = spacy.blank("en")
@@ -2750,6 +2799,127 @@ def build_default_extractor(
         embedding_cache_dir=embedding_cache_dir,
         embedding_max_candidates=embedding_max_candidates,
     )
+
+
+def extract_text(
+    text: str,
+    *,
+    entity_threshold: float = 0.35,
+    relation_threshold: float = 0.2,
+    max_chars: int = 600,
+    chunk_mode: str = "paragraph",
+    chunk_overlap: int = 1,
+    mode: str = "balanced",
+    max_model_spans: int = 4,
+    disable_rebel: bool = False,
+    embedding_linking: bool = False,
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    embedding_threshold: float = 0.84,
+    embedding_cache_dir: str | Path = ".cache/extract_graph_embeddings",
+    embedding_max_candidates: int = 8,
+    document_source: str = "inline",
+    document_title: str = "inline_text",
+    include_chunk_text: bool = True,
+    entity_scope: str = "document",
+) -> GraphExtraction:
+    extractor = build_default_extractor(
+        max_chars=max_chars,
+        chunk_mode=chunk_mode,
+        chunk_overlap=chunk_overlap,
+        mode=mode,
+        max_model_spans=max_model_spans,
+        disable_rebel=disable_rebel,
+        embedding_linking=embedding_linking,
+        embedding_model=embedding_model,
+        embedding_threshold=embedding_threshold,
+        embedding_cache_dir=embedding_cache_dir,
+        embedding_max_candidates=embedding_max_candidates,
+    )
+    return extractor.extract(
+        text,
+        entity_threshold=entity_threshold,
+        relation_threshold=relation_threshold,
+        max_chars=max_chars,
+        chunk_mode=chunk_mode,
+        chunk_overlap=chunk_overlap,
+        mode=mode,
+        max_model_spans=max_model_spans,
+        disable_rebel=disable_rebel,
+        embedding_linking=embedding_linking,
+        embedding_model=embedding_model,
+        embedding_threshold=embedding_threshold,
+        embedding_cache_dir=embedding_cache_dir,
+        embedding_max_candidates=embedding_max_candidates,
+        document_source=document_source,
+        document_title=document_title,
+        include_chunk_text=include_chunk_text,
+        entity_scope=entity_scope,
+    )
+
+
+def extract_files(
+    paths: Sequence[str | Path],
+    *,
+    entity_threshold: float = 0.35,
+    relation_threshold: float = 0.2,
+    max_chars: int = 600,
+    chunk_mode: str = "paragraph",
+    chunk_overlap: int = 1,
+    mode: str = "balanced",
+    max_model_spans: int = 4,
+    disable_rebel: bool = False,
+    embedding_linking: bool = False,
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    embedding_threshold: float = 0.84,
+    embedding_cache_dir: str | Path = ".cache/extract_graph_embeddings",
+    embedding_max_candidates: int = 8,
+    include_chunk_text: bool = True,
+    entity_scope: str = "document",
+) -> GraphExtraction:
+    documents = [
+        DocumentInput(
+            text=Path(path).read_text(encoding="utf-8"),
+            source=Path(path).name,
+            title=Path(path).name,
+        )
+        for path in paths
+    ]
+    extractor = build_default_extractor(
+        max_chars=max_chars,
+        chunk_mode=chunk_mode,
+        chunk_overlap=chunk_overlap,
+        mode=mode,
+        max_model_spans=max_model_spans,
+        disable_rebel=disable_rebel,
+        embedding_linking=embedding_linking,
+        embedding_model=embedding_model,
+        embedding_threshold=embedding_threshold,
+        embedding_cache_dir=embedding_cache_dir,
+        embedding_max_candidates=embedding_max_candidates,
+    )
+    return extractor.extract_documents(
+        documents,
+        entity_threshold=entity_threshold,
+        relation_threshold=relation_threshold,
+        max_chars=max_chars,
+        chunk_mode=chunk_mode,
+        chunk_overlap=chunk_overlap,
+        mode=mode,
+        max_model_spans=max_model_spans,
+        disable_rebel=disable_rebel,
+        embedding_linking=embedding_linking,
+        embedding_model=embedding_model,
+        embedding_threshold=embedding_threshold,
+        embedding_cache_dir=embedding_cache_dir,
+        embedding_max_candidates=embedding_max_candidates,
+        include_chunk_text=include_chunk_text,
+        entity_scope=entity_scope,
+    )
+
+
+def write_json(result: GraphExtraction, path: str | Path, *, pretty: bool = False) -> None:
+    payload = result.model_dump_json(indent=2 if pretty else None)
+    Path(path).write_text(payload + "\n", encoding="utf-8")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

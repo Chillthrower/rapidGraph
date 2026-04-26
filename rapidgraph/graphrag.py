@@ -251,6 +251,51 @@ class GraphRAGClient:
         )
 
 
+def ask_neo4j_graph(
+    question: str,
+    *,
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    neo4j_database: str = "neo4j",
+    neo4j_vector_index_name: str = DEFAULT_VECTOR_INDEX_NAME,
+    neo4j_embedding_property: str = DEFAULT_EMBEDDING_PROPERTY,
+    chunk_embedding_model: str = DEFAULT_CHUNK_EMBEDDING_MODEL,
+    ollama_model: str,
+    ollama_host: str = "http://127.0.0.1:11434",
+    ollama_timeout: float = 120.0,
+    top_k: int = 5,
+    graph_depth: int = 1,
+    max_facts: int = 20,
+    driver_factory: Any | None = None,
+    embedding_backend: Any | None = None,
+    http_client: Any | None = None,
+) -> GraphRAGAnswer:
+    retriever = Neo4jVectorRetriever(
+        uri=neo4j_uri,
+        user=neo4j_user,
+        password=neo4j_password,
+        database=neo4j_database,
+        vector_index_name=neo4j_vector_index_name,
+        embedding_property=neo4j_embedding_property,
+        embedding_model=chunk_embedding_model,
+        driver_factory=driver_factory,
+        embedding_backend=embedding_backend,
+    )
+    llm = OllamaLLM(
+        model=ollama_model,
+        host=ollama_host,
+        timeout=ollama_timeout,
+        http_client=http_client,
+    )
+    return GraphRAGClient(retriever=retriever, llm=llm).ask(
+        question,
+        top_k=top_k,
+        graph_depth=graph_depth,
+        max_facts=max_facts,
+    )
+
+
 def build_vector_retrieval_query() -> str:
     return """
 CALL db.index.vector.queryNodes($index_name, $top_k, $embedding)

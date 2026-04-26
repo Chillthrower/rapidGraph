@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import extract_graph
+import rapidgraph.core as rapidgraph_core
 from rapidgraph import graphrag
 from extract_graph import (
     Chunk,
@@ -1635,3 +1636,228 @@ def test_cli_ask_parses_and_forwards_graphrag_flags(monkeypatch, capsys):
 def test_cli_ask_requires_credentials():
     with pytest.raises(SystemExit):
         extract_graph.main(["ask", "--question", "hello", "--ollama-model", "llama3.2"])
+
+
+class StubExtractorForPythonApi:
+    def __init__(self, fake_result: GraphExtraction, captured: dict[str, object]):
+        self.fake_result = fake_result
+        self.captured = captured
+
+    def extract(self, text, **kwargs):
+        self.captured["text"] = text
+        self.captured["extract_kwargs"] = kwargs
+        return self.fake_result
+
+    def extract_documents(self, documents, **kwargs):
+        self.captured["documents"] = documents
+        self.captured["extract_documents_kwargs"] = kwargs
+        return self.fake_result
+
+
+def test_extract_text_forwards_options_and_returns_graph(monkeypatch):
+    result = build_minimal_graph_for_neo4j_export()
+    captured: dict[str, object] = {}
+
+    def fake_build_default_extractor(**kwargs):
+        captured["builder_kwargs"] = kwargs
+        return StubExtractorForPythonApi(result, captured)
+
+    monkeypatch.setattr(rapidgraph_core, "build_default_extractor", fake_build_default_extractor)
+
+    actual = extract_graph.extract_text(
+        "Transformer uses attention.",
+        entity_threshold=0.4,
+        relation_threshold=0.3,
+        max_chars=700,
+        chunk_mode="sentence",
+        chunk_overlap=2,
+        mode="fast",
+        max_model_spans=3,
+        disable_rebel=True,
+        embedding_linking=True,
+        embedding_model="fake-embedding",
+        embedding_threshold=0.9,
+        embedding_cache_dir=".cache/test",
+        embedding_max_candidates=5,
+        document_source="inline-test",
+        document_title="Inline Test",
+        include_chunk_text=False,
+        entity_scope="corpus",
+    )
+
+    assert actual is result
+    assert captured["builder_kwargs"]["mode"] == "fast"
+    assert captured["builder_kwargs"]["embedding_linking"] is True
+    assert captured["text"] == "Transformer uses attention."
+    assert captured["extract_kwargs"]["entity_threshold"] == 0.4
+    assert captured["extract_kwargs"]["relation_threshold"] == 0.3
+    assert captured["extract_kwargs"]["document_source"] == "inline-test"
+    assert captured["extract_kwargs"]["document_title"] == "Inline Test"
+    assert captured["extract_kwargs"]["include_chunk_text"] is False
+    assert captured["extract_kwargs"]["entity_scope"] == "corpus"
+
+
+def test_extract_files_reads_utf8_files_and_forwards_entity_scope(monkeypatch, tmp_path: Path):
+    result = build_minimal_graph_for_neo4j_export()
+    captured: dict[str, object] = {}
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("Google is based in California.", encoding="utf-8")
+    second.write_text("Sundar Pichai leads Google.", encoding="utf-8")
+
+    def fake_build_default_extractor(**kwargs):
+        captured["builder_kwargs"] = kwargs
+        return StubExtractorForPythonApi(result, captured)
+
+    monkeypatch.setattr(rapidgraph_core, "build_default_extractor", fake_build_default_extractor)
+
+    actual = extract_graph.extract_files(
+        [first, second],
+        mode="balanced",
+        max_model_spans=9,
+        include_chunk_text=False,
+        entity_scope="corpus",
+    )
+
+    assert actual is result
+    assert captured["builder_kwargs"]["mode"] == "balanced"
+    assert captured["builder_kwargs"]["max_model_spans"] == 9
+    documents = captured["documents"]
+    assert [document.text for document in documents] == [
+        "Google is based in California.",
+        "Sundar Pichai leads Google.",
+    ]
+    assert [document.source for document in documents] == ["one.txt", "two.txt"]
+    assert [document.title for document in documents] == ["one.txt", "two.txt"]
+    assert captured["extract_documents_kwargs"]["include_chunk_text"] is False
+    assert captured["extract_documents_kwargs"]["entity_scope"] == "corpus"
+
+
+def test_write_json_supports_compact_and_pretty_output(tmp_path: Path):
+    result = build_minimal_graph_for_neo4j_export()
+    compact = tmp_path / "compact.json"
+    pretty = tmp_path / "pretty.json"
+
+    extract_graph.write_json(result, compact)
+    extract_graph.write_json(result, pretty, pretty=True)
+
+    compact_text = compact.read_text(encoding="utf-8")
+    pretty_text = pretty.read_text(encoding="utf-8")
+    assert "\n  " not in compact_text
+    assert "\n  " in pretty_text
+    assert json.loads(compact_text)["documents"][0]["id"] == "D1"
+    assert json.loads(pretty_text)["documents"][0]["id"] == "D1"
+
+
+def test_neo4j_graph_writer_delegates_to_export(monkeypatch):
+    result = build_minimal_graph_for_neo4j_export()
+    captured: dict[str, object] = {}
+    embedding_backend = StaticEmbeddingBackend()
+
+    def fake_export_graph_to_neo4j(graph, **kwargs):
+        captured["graph"] = graph
+        captured.update(kwargs)
+
+    monkeypatch.setattr(rapidgraph_core, "export_graph_to_neo4j", fake_export_graph_to_neo4j)
+
+    writer = extract_graph.Neo4jGraphWriter(
+        uri="neo4j://example",
+        user="neo4j",
+        password="secret",
+        database="graphrag",
+        vector_index_name="custom_index",
+        embedding_property="vector",
+        chunk_embedding_model="fake-embedder",
+        driver_factory="driver_factory",
+        embedding_backend=embedding_backend,
+    )
+    writer.write(result, clean_document=True, embed_chunks=True, create_vector_index=True)
+
+    assert captured["graph"] is result
+    assert captured["uri"] == "neo4j://example"
+    assert captured["user"] == "neo4j"
+    assert captured["password"] == "secret"
+    assert captured["database"] == "graphrag"
+    assert captured["clean_document"] is True
+    assert captured["embed_chunks"] is True
+    assert captured["create_vector_index"] is True
+    assert captured["vector_index_name"] == "custom_index"
+    assert captured["embedding_property"] == "vector"
+    assert captured["chunk_embedding_model"] == "fake-embedder"
+    assert captured["driver_factory"] == "driver_factory"
+    assert captured["embedding_backend"] is embedding_backend
+
+
+def test_ask_neo4j_graph_builds_client_and_forwards_options(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeRetriever:
+        def __init__(self, **kwargs):
+            captured["retriever_kwargs"] = kwargs
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            captured["llm_kwargs"] = kwargs
+
+    class FakeClient:
+        def __init__(self, *, retriever, llm):
+            captured["retriever"] = retriever
+            captured["llm"] = llm
+
+        def ask(self, question, *, top_k, graph_depth, max_facts):
+            captured["ask"] = {
+                "question": question,
+                "top_k": top_k,
+                "graph_depth": graph_depth,
+                "max_facts": max_facts,
+            }
+            return graphrag.GraphRAGAnswer(answer="answer", sources=[], facts=[], meta={})
+
+    monkeypatch.setattr(graphrag, "Neo4jVectorRetriever", FakeRetriever)
+    monkeypatch.setattr(graphrag, "OllamaLLM", FakeLLM)
+    monkeypatch.setattr(graphrag, "GraphRAGClient", FakeClient)
+
+    answer = graphrag.ask_neo4j_graph(
+        "What uses attention?",
+        neo4j_uri="neo4j://example",
+        neo4j_user="neo4j",
+        neo4j_password="secret",
+        neo4j_database="graphrag",
+        neo4j_vector_index_name="custom_index",
+        neo4j_embedding_property="vector",
+        chunk_embedding_model="fake-embedder",
+        ollama_model="llama3.2",
+        ollama_host="http://ollama.local",
+        ollama_timeout=30.0,
+        top_k=4,
+        graph_depth=1,
+        max_facts=8,
+        driver_factory="driver_factory",
+        embedding_backend="embedding_backend",
+        http_client="http_client",
+    )
+
+    assert answer.answer == "answer"
+    assert captured["retriever_kwargs"] == {
+        "uri": "neo4j://example",
+        "user": "neo4j",
+        "password": "secret",
+        "database": "graphrag",
+        "vector_index_name": "custom_index",
+        "embedding_property": "vector",
+        "embedding_model": "fake-embedder",
+        "driver_factory": "driver_factory",
+        "embedding_backend": "embedding_backend",
+    }
+    assert captured["llm_kwargs"] == {
+        "model": "llama3.2",
+        "host": "http://ollama.local",
+        "timeout": 30.0,
+        "http_client": "http_client",
+    }
+    assert captured["ask"] == {
+        "question": "What uses attention?",
+        "top_k": 4,
+        "graph_depth": 1,
+        "max_facts": 8,
+    }

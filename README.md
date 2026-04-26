@@ -943,7 +943,77 @@ Ask mode output contains:
 
 ## Python Library Usage
 
+### Recommended imports
+
+These are the main imports application code should rely on:
+
+```python
+from rapidgraph import (
+    DocumentInput,
+    EntityModel,
+    GraphExtraction,
+    GraphExtractor,
+    GraphRAGAnswer,
+    GraphRAGClient,
+    Neo4jGraphWriter,
+    Neo4jVectorRetriever,
+    OllamaLLM,
+    RelationModel,
+    RetrievedChunk,
+    RetrievedFact,
+    SchemaEdgeModel,
+    ask_neo4j_graph,
+    build_default_extractor,
+    export_graph_to_neo4j,
+    extract_files,
+    extract_text,
+    write_json,
+)
+```
+
 ### Basic usage
+
+```python
+from rapidgraph import extract_files, extract_text, write_json
+
+text_result = extract_text(
+    "Google is based in California. Sundar Pichai leads Google.",
+    mode="fast",
+)
+
+file_result = extract_files(
+    ["input.txt", "input2.txt"],
+    mode="balanced",
+    entity_scope="corpus",
+)
+
+write_json(file_result, "graph.json", pretty=True)
+print(text_result.model_dump_json(indent=2))
+```
+
+### Work with typed output models
+
+`rapidGraph` returns Pydantic models, so you can inspect typed fields or serialize directly.
+
+```python
+from rapidgraph import GraphExtraction, extract_text
+
+result: GraphExtraction = extract_text(
+    "OpenAI is based in San Francisco.",
+    mode="fast",
+)
+
+for entity in result.entities:
+    print(entity.id, entity.text, entity.type, entity.confidence)
+
+for relation in result.relations:
+    print(relation.source_id, relation.relation, relation.target_id)
+
+payload = result.model_dump()
+json_payload = result.model_dump_json(indent=2)
+```
+
+### Lower-level extractor usage
 
 ```python
 from rapidgraph import DocumentInput, build_default_extractor
@@ -969,18 +1039,56 @@ result = extractor.extract_documents(
 print(result.model_dump())
 ```
 
-### Single-document usage
+### Single-document extraction with explicit options
 
 ```python
-from rapidgraph import build_default_extractor
+from rapidgraph import extract_text
 
-extractor = build_default_extractor(mode="fast")
-result = extractor.extract(
+result = extract_text(
     "Transformer uses multi-head attention.",
+    entity_threshold=0.35,
+    relation_threshold=0.2,
+    max_chars=600,
+    chunk_mode="paragraph",
+    chunk_overlap=1,
+    mode="balanced",
+    max_model_spans=4,
+    disable_rebel=False,
+    include_chunk_text=True,
+    entity_scope="document",
+)
+```
+
+### Multi-file extraction
+
+```python
+from rapidgraph import extract_files
+
+result = extract_files(
+    ["input.txt", "input2.txt"],
+    mode="balanced",
+    entity_scope="corpus",
     include_chunk_text=True,
 )
 
-print(result.model_dump_json(indent=2))
+print(result.documents)
+print(result.chunks)
+```
+
+### Embedding-assisted extraction
+
+```python
+from rapidgraph import extract_text
+
+result = extract_text(
+    "The transformer model uses attention. The Transformer architecture uses self attention.",
+    mode="balanced",
+    embedding_linking=True,
+    embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+    embedding_threshold=0.84,
+    embedding_cache_dir=".cache/extract_graph_embeddings",
+    embedding_max_candidates=8,
+)
 ```
 
 ### Configurable extractor construction
@@ -998,27 +1106,58 @@ extractor = build_default_extractor(
 )
 ```
 
+### JSON output helper
+
+```python
+from rapidgraph import extract_text, write_json
+
+result = extract_text("Google is based in California.", mode="fast")
+
+write_json(result, "graph.compact.json")
+write_json(result, "graph.pretty.json", pretty=True)
+```
+
 ### Python library usage with Neo4j export
 
 This example extracts a graph in Python and then writes it directly to Neo4j.
 
 ```python
-from rapidgraph import build_default_extractor, export_graph_to_neo4j
+from rapidgraph import Neo4jGraphWriter, extract_text
 
-extractor = build_default_extractor(
+result = extract_text(
+    "Google is based in California. Sundar Pichai leads Google.",
     mode="balanced",
-    chunk_mode="paragraph",
-    chunk_overlap=1,
-)
-
-result = extractor.extract(
-    """
-    Google is based in California.
-    Sundar Pichai leads Google.
-    """,
     entity_scope="document",
     include_chunk_text=True,
 )
+
+writer = Neo4jGraphWriter(
+    uri="neo4j://127.0.0.1:7687",
+    user="neo4j",
+    password="12345678",
+    database="neo4j",
+)
+
+writer.write(
+    result,
+    clean_document=True,
+    embed_chunks=True,
+    create_vector_index=True,
+)
+```
+
+If you want to use the Neo4j helper, install the extra first:
+
+```bash
+pip install "rapidGraph[neo4j]"
+```
+
+The lower-level function is still available if you prefer a stateless call:
+
+```python
+from rapidgraph import export_graph_to_neo4j, extract_text
+
+result = extract_text("Google is based in California.", mode="fast")
 
 export_graph_to_neo4j(
     result,
@@ -1030,13 +1169,30 @@ export_graph_to_neo4j(
 )
 ```
 
-If you want to use the Neo4j helper, install the extra first:
+### Python library usage with GraphRAG ask
 
-```bash
-pip install "rapidGraph[neo4j]"
+```python
+from rapidgraph import ask_neo4j_graph
+
+answer = ask_neo4j_graph(
+    "What does the graph say about attention?",
+    neo4j_uri="neo4j://127.0.0.1:7687",
+    neo4j_user="neo4j",
+    neo4j_password="12345678",
+    neo4j_database="neo4j",
+    ollama_model="llama3.2",
+    ollama_host="http://127.0.0.1:11434",
+    top_k=5,
+    graph_depth=1,
+    max_facts=20,
+)
+
+print(answer.model_dump_json(indent=2))
 ```
 
-### Python library usage with GraphRAG ask
+The lower-level `GraphRAGClient`, `Neo4jVectorRetriever`, and `OllamaLLM` classes remain available when you want to customize providers directly.
+
+### Lower-level GraphRAG composition
 
 ```python
 from rapidgraph import GraphRAGClient, Neo4jVectorRetriever, OllamaLLM
@@ -1046,11 +1202,15 @@ retriever = Neo4jVectorRetriever(
     user="neo4j",
     password="12345678",
     database="neo4j",
+    vector_index_name="rapidgraph_chunk_embedding",
+    embedding_property="embedding",
+    embedding_model="sentence-transformers/all-MiniLM-L6-v2",
 )
 
 llm = OllamaLLM(
     model="llama3.2",
     host="http://127.0.0.1:11434",
+    timeout=120.0,
 )
 
 client = GraphRAGClient(retriever=retriever, llm=llm)
@@ -1061,7 +1221,35 @@ answer = client.ask(
     max_facts=20,
 )
 
-print(answer.model_dump_json(indent=2))
+print(answer.answer)
+print(answer.sources)
+print(answer.facts)
+```
+
+### Response model imports
+
+Use these when annotating functions or building integrations around rapidGraph output.
+
+```python
+from rapidgraph import (
+    ChunkModel,
+    DocumentModel,
+    EntityModel,
+    GraphExtraction,
+    GraphRAGAnswer,
+    MentionModel,
+    RelationModel,
+    RelationSupportModel,
+    RetrievedChunk,
+    RetrievedFact,
+    SchemaEdgeModel,
+)
+
+def entity_names(result: GraphExtraction) -> list[str]:
+    return [entity.text for entity in result.entities]
+
+def source_ids(answer: GraphRAGAnswer) -> list[str]:
+    return [source.id for source in answer.sources]
 ```
 
 ## Performance and Practical Notes

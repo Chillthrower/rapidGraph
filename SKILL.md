@@ -195,6 +195,9 @@ The most important public entry points are re-exported from `rapidgraph`.
 
 Key public API functions and classes:
 
+- `extract_text(...)`
+- `extract_files(...)`
+- `write_json(...)`
 - `build_default_extractor(...)`
 - `GraphExtractor`
 - `DocumentInput`
@@ -203,9 +206,11 @@ Key public API functions and classes:
 - `RelationModel`
 - `SchemaEdgeModel`
 - `export_graph_to_neo4j(...)`
+- `Neo4jGraphWriter`
 - `Neo4jVectorRetriever`
 - `OllamaLLM`
 - `GraphRAGClient`
+- `ask_neo4j_graph(...)`
 
 ## Core Data Models
 
@@ -762,25 +767,25 @@ rapidgraph ask \
 ### Python API
 
 ```python
-from rapidgraph import build_default_extractor
+from rapidgraph import extract_text, write_json
 
-extractor = build_default_extractor(mode="balanced")
-result = extractor.extract("Google is based in California.")
+result = extract_text("Google is based in California.", mode="balanced")
+write_json(result, "graph.json", pretty=True)
 print(result.model_dump())
 ```
 
 ### Python GraphRAG API
 
 ```python
-from rapidgraph import GraphRAGClient, Neo4jVectorRetriever, OllamaLLM
+from rapidgraph import ask_neo4j_graph
 
-retriever = Neo4jVectorRetriever(
-    uri="neo4j://127.0.0.1:7687",
-    user="neo4j",
-    password="12345678",
+answer = ask_neo4j_graph(
+    "What does the graph say?",
+    neo4j_uri="neo4j://127.0.0.1:7687",
+    neo4j_user="neo4j",
+    neo4j_password="12345678",
+    ollama_model="llama3.2",
 )
-llm = OllamaLLM(model="llama3.2")
-answer = GraphRAGClient(retriever=retriever, llm=llm).ask("What does the graph say?")
 print(answer.model_dump())
 ```
 
