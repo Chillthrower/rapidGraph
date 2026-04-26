@@ -18,6 +18,7 @@ The package is designed for:
 - provenance-aware graph construction
 - future GraphRAG / RAG workflows
 - optional Neo4j ingestion
+- optional Neo4j vector GraphRAG question answering with Ollama
 
 The public package name is `rapidGraph`, the import package is `rapidgraph`, and the installed CLI command is `rapidgraph`.
 
@@ -34,6 +35,7 @@ The public package name is `rapidGraph`, the import package is `rapidgraph`, and
 - [CLI Reference](#cli-reference)
 - [Recommended Flag Combinations](#recommended-flag-combinations)
 - [Neo4j Export Model](#neo4j-export-model)
+- [GraphRAG Ask Mode](#graphrag-ask-mode)
 - [Python Library Usage](#python-library-usage)
 - [Performance and Practical Notes](#performance-and-practical-notes)
 - [Troubleshooting](#troubleshooting)
@@ -74,6 +76,7 @@ The extractor is open-domain and best-effort. It does not rely on a fixed busine
   - `quality`
 - Optional embedding-assisted entity merging and relation endpoint linking
 - Optional Neo4j export
+- Optional GraphRAG query layer over Neo4j vector indexes and Ollama
 - Backward-compatible `potential_schema` plus richer `expanded_schema`
 
 ## Installation
@@ -98,6 +101,12 @@ Embedding-assisted linking:
 pip install "rapidGraph[embeddings]"
 ```
 
+GraphRAG query support:
+
+```bash
+pip install "rapidGraph[graphrag]"
+```
+
 Development tooling:
 
 ```bash
@@ -107,7 +116,7 @@ pip install "rapidGraph[dev]"
 Everything:
 
 ```bash
-pip install "rapidGraph[neo4j,embeddings,dev]"
+pip install "rapidGraph[neo4j,embeddings,graphrag,dev]"
 ```
 
 ### Install from source
@@ -119,7 +128,7 @@ pip install .
 Or with extras:
 
 ```bash
-pip install ".[neo4j,embeddings,dev]"
+pip install ".[neo4j,embeddings,graphrag,dev]"
 ```
 
 ## Quick Start
@@ -152,6 +161,30 @@ Write JSON to a file:
 
 ```bash
 rapidgraph --input input.txt --output graph.json --pretty
+```
+
+Export to Neo4j with chunk embeddings and a vector index for GraphRAG:
+
+```bash
+rapidgraph \
+  --input input.txt \
+  --neo4j-uri neo4j://127.0.0.1:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password 12345678 \
+  --neo4j-embed-chunks \
+  --neo4j-create-vector-index
+```
+
+Ask the graph using Ollama:
+
+```bash
+rapidgraph ask \
+  --question "What does the text say about attention?" \
+  --neo4j-uri neo4j://127.0.0.1:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password 12345678 \
+  --ollama-model llama3.2 \
+  --pretty
 ```
 
 The repo-root compatibility shim also works:
@@ -695,6 +728,36 @@ Deletes matching document subgraphs before re-ingesting them.
 
 Useful when rerunning the same files and you do not want duplicate document/chunk subgraphs.
 
+#### `--neo4j-embed-chunks`
+
+Generate embeddings for exported `Chunk` nodes and store them in Neo4j.
+
+#### `--neo4j-create-vector-index`
+
+Create a Neo4j vector index for `Chunk` embeddings. This is required for `rapidgraph ask`.
+
+#### `--neo4j-vector-index-name`
+
+Default: `rapidgraph_chunk_embedding`
+
+Name of the Neo4j vector index used for chunk retrieval.
+
+#### `--neo4j-embedding-property`
+
+Default: `embedding`
+
+Property on `Chunk` nodes used to store vector embeddings.
+
+#### `--chunk-embedding-model`
+
+Default:
+
+```text
+sentence-transformers/all-MiniLM-L6-v2
+```
+
+Sentence-transformers model used for chunk embeddings.
+
 Example:
 
 ```bash
@@ -706,7 +769,9 @@ rapidgraph \
   --neo4j-user neo4j \
   --neo4j-password 12345678 \
   --neo4j-database neo4j \
-  --neo4j-clean-document
+  --neo4j-clean-document \
+  --neo4j-embed-chunks \
+  --neo4j-create-vector-index
 ```
 
 ### Logging
@@ -784,7 +849,9 @@ rapidgraph \
   --neo4j-user neo4j \
   --neo4j-password 12345678 \
   --neo4j-database neo4j \
-  --neo4j-clean-document
+  --neo4j-clean-document \
+  --neo4j-embed-chunks \
+  --neo4j-create-vector-index
 ```
 
 ## Neo4j Export Model
@@ -815,6 +882,64 @@ MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
 RETURN s.text, r.relation, t.text, r.evidence
 ORDER BY r.relation
 ```
+
+## GraphRAG Ask Mode
+
+`rapidgraph ask` lets users ask questions against a Neo4j graph that was exported with chunk embeddings.
+
+Required setup:
+
+```bash
+pip install "rapidGraph[graphrag]"
+```
+
+First export data with embeddings and a vector index:
+
+```bash
+rapidgraph \
+  --input input.txt \
+  --mode balanced \
+  --neo4j-uri neo4j://127.0.0.1:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password 12345678 \
+  --neo4j-database neo4j \
+  --neo4j-clean-document \
+  --neo4j-embed-chunks \
+  --neo4j-create-vector-index
+```
+
+Then ask a question:
+
+```bash
+rapidgraph ask \
+  --question "What are the main relations in this document?" \
+  --neo4j-uri neo4j://127.0.0.1:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password 12345678 \
+  --neo4j-database neo4j \
+  --ollama-host http://127.0.0.1:11434 \
+  --ollama-model llama3.2 \
+  --top-k 5 \
+  --graph-depth 1 \
+  --max-facts 20 \
+  --pretty
+```
+
+Ask mode retrieval flow:
+
+- embed the question
+- query the Neo4j vector index over `Chunk.embedding`
+- expand from retrieved chunks to mentioned entities
+- collect nearby `RELATES_TO` facts
+- build a compact context packet
+- ask Ollama to answer using only that context
+
+Ask mode output contains:
+
+- `answer`
+- `sources`
+- `facts`
+- `meta`
 
 ## Python Library Usage
 
@@ -909,6 +1034,34 @@ If you want to use the Neo4j helper, install the extra first:
 
 ```bash
 pip install "rapidGraph[neo4j]"
+```
+
+### Python library usage with GraphRAG ask
+
+```python
+from rapidgraph import GraphRAGClient, Neo4jVectorRetriever, OllamaLLM
+
+retriever = Neo4jVectorRetriever(
+    uri="neo4j://127.0.0.1:7687",
+    user="neo4j",
+    password="12345678",
+    database="neo4j",
+)
+
+llm = OllamaLLM(
+    model="llama3.2",
+    host="http://127.0.0.1:11434",
+)
+
+client = GraphRAGClient(retriever=retriever, llm=llm)
+answer = client.ask(
+    "What does the graph say about attention?",
+    top_k=5,
+    graph_depth=1,
+    max_facts=20,
+)
+
+print(answer.model_dump_json(indent=2))
 ```
 
 ## Performance and Practical Notes

@@ -493,6 +493,42 @@ SET r.confidence = row.confidence,
 """
 
 
+def quote_neo4j_identifier(identifier: str) -> str:
+    if not identifier or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+        raise ValueError(f"Invalid Neo4j identifier: {identifier!r}")
+    return f"`{identifier}`"
+
+
+def build_neo4j_vector_index_query(
+    *,
+    index_name: str,
+    embedding_property: str,
+) -> str:
+    quoted_index = quote_neo4j_identifier(index_name)
+    quoted_property = quote_neo4j_identifier(embedding_property)
+    return f"""
+CREATE VECTOR INDEX {quoted_index} IF NOT EXISTS
+FOR (c:Chunk) ON (c.{quoted_property})
+OPTIONS {{
+  indexConfig: {{
+    `vector.dimensions`: $dimension,
+    `vector.similarity_function`: $similarity_function
+  }}
+}}
+"""
+
+
+def build_neo4j_chunk_embedding_query(*, embedding_property: str) -> str:
+    quoted_property = quote_neo4j_identifier(embedding_property)
+    return f"""
+UNWIND $rows AS row
+MATCH (c:Chunk {{id: row.id}})
+SET c.{quoted_property} = row.embedding,
+    c.embedding_model = row.embedding_model,
+    c.embedding_dimension = row.embedding_dimension
+"""
+
+
 NEO4J_DELETE_DOCUMENT_RELATIONS_QUERY = """
 MATCH ()-[r:RELATES_TO]->()
 WHERE $document_id IN r.document_ids
@@ -1208,11 +1244,53 @@ def build_neo4j_mention_rows(entities: Sequence[EntityModel]) -> list[dict[str, 
     return rows
 
 
+def build_neo4j_chunk_embedding_rows(
+    chunks: Sequence[ChunkModel],
+    *,
+    embedding_model: str,
+    embedding_backend: EmbeddingBackend | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    chunks_with_text = [chunk for chunk in chunks if normalize_whitespace(chunk.text)]
+    if chunks and not chunks_with_text:
+        raise RuntimeError(
+            "Neo4j chunk embedding export requires chunk text. Re-run without --omit-provenance-text."
+        )
+    if not chunks_with_text:
+        return [], 0
+
+    backend = embedding_backend or SentenceTransformerEmbeddingBackend(embedding_model)
+    vectors = backend.embed_many([chunk.text for chunk in chunks_with_text])
+    rows: list[dict[str, Any]] = []
+    dimension = 0
+    for chunk, vector in zip(chunks_with_text, vectors):
+        embedding = [float(value) for value in vector]
+        if not embedding:
+            continue
+        dimension = dimension or len(embedding)
+        if len(embedding) != dimension:
+            raise RuntimeError("Embedding backend returned vectors with inconsistent dimensions.")
+        rows.append(
+            {
+                "id": chunk.id,
+                "embedding": embedding,
+                "embedding_model": embedding_model,
+                "embedding_dimension": dimension,
+            }
+        )
+    return rows, dimension
+
+
 def validate_neo4j_args(args: argparse.Namespace) -> bool:
     values = (args.neo4j_uri, args.neo4j_user, args.neo4j_password)
-    enabled = any(values)
+    export_options = (
+        getattr(args, "neo4j_embed_chunks", False),
+        getattr(args, "neo4j_create_vector_index", False),
+    )
+    enabled = any(values) or any(export_options)
     if enabled and not all(values):
         raise SystemExit("Neo4j export requires --neo4j-uri, --neo4j-user, and --neo4j-password.")
+    if getattr(args, "neo4j_create_vector_index", False) and not getattr(args, "neo4j_embed_chunks", False):
+        raise SystemExit("Neo4j vector index creation requires --neo4j-embed-chunks.")
     return enabled
 
 
@@ -1224,8 +1302,16 @@ def export_graph_to_neo4j(
     password: str,
     database: str = "neo4j",
     clean_document: bool = False,
+    embed_chunks: bool = False,
+    create_vector_index: bool = False,
+    vector_index_name: str = "rapidgraph_chunk_embedding",
+    embedding_property: str = "embedding",
+    chunk_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    embedding_backend: EmbeddingBackend | None = None,
     driver_factory: Any | None = None,
 ) -> None:
+    if create_vector_index and not embed_chunks:
+        raise RuntimeError("Neo4j vector index creation requires embed_chunks=True.")
     if driver_factory is None:
         try:
             from neo4j import GraphDatabase
@@ -1284,6 +1370,28 @@ def export_graph_to_neo4j(
                     NEO4J_RELATION_QUERY,
                     rows=[relation.model_dump() for relation in result.relations],
                 )
+            if embed_chunks:
+                embedding_rows, dimension = build_neo4j_chunk_embedding_rows(
+                    result.chunks,
+                    embedding_model=chunk_embedding_model,
+                    embedding_backend=embedding_backend,
+                )
+                if embedding_rows:
+                    if create_vector_index:
+                        session.run(
+                            build_neo4j_vector_index_query(
+                                index_name=vector_index_name,
+                                embedding_property=embedding_property,
+                            ),
+                            dimension=dimension,
+                            similarity_function="cosine",
+                        )
+                    session.run(
+                        build_neo4j_chunk_embedding_query(
+                            embedding_property=embedding_property,
+                        ),
+                        rows=embedding_rows,
+                    )
     finally:
         close = getattr(driver, "close", None)
         if callable(close):
@@ -2738,6 +2846,58 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Delete the matching document subgraph before re-ingesting it into Neo4j.",
     )
     parser.add_argument(
+        "--neo4j-embed-chunks",
+        action="store_true",
+        help="Generate and store chunk embeddings on Neo4j Chunk nodes during export.",
+    )
+    parser.add_argument(
+        "--neo4j-create-vector-index",
+        action="store_true",
+        help="Create a Neo4j vector index for Chunk embeddings during export.",
+    )
+    parser.add_argument(
+        "--neo4j-vector-index-name",
+        default="rapidgraph_chunk_embedding",
+        help="Neo4j vector index name used for Chunk embedding retrieval.",
+    )
+    parser.add_argument(
+        "--neo4j-embedding-property",
+        default="embedding",
+        help="Chunk node property used to store embedding vectors in Neo4j.",
+    )
+    parser.add_argument(
+        "--chunk-embedding-model",
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        help="Sentence-transformers model used to embed Chunk text for Neo4j vector retrieval.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="WARNING",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    )
+    return parser.parse_args(argv)
+
+
+def parse_ask_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="rapidgraph ask",
+        description="Ask a question against a Neo4j rapidGraph database using vector retrieval and Ollama.",
+    )
+    parser.add_argument("--question", required=True, help="Question to answer from the graph.")
+    parser.add_argument("--neo4j-uri", required=True, help="Neo4j URI, e.g. neo4j://127.0.0.1:7687.")
+    parser.add_argument("--neo4j-user", required=True, help="Neo4j username.")
+    parser.add_argument("--neo4j-password", required=True, help="Neo4j password.")
+    parser.add_argument("--neo4j-database", default="neo4j", help="Neo4j database name.")
+    parser.add_argument("--neo4j-vector-index-name", default="rapidgraph_chunk_embedding")
+    parser.add_argument("--neo4j-embedding-property", default="embedding")
+    parser.add_argument("--chunk-embedding-model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of vector-retrieved chunks.")
+    parser.add_argument("--graph-depth", type=int, default=1, help="Graph expansion depth. v1 supports 0 or 1.")
+    parser.add_argument("--max-facts", type=int, default=20, help="Maximum graph facts passed to the model.")
+    parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Ollama host URL.")
+    parser.add_argument("--ollama-model", required=True, help="Ollama model name.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    parser.add_argument(
         "--log-level",
         default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -2764,7 +2924,38 @@ def read_input_text(args: argparse.Namespace) -> tuple[str, str, str]:
     return document.text, document.source, document.title
 
 
+def ask_main(argv: Sequence[str] | None = None) -> int:
+    args = parse_ask_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level))
+
+    from .graphrag import GraphRAGClient, Neo4jVectorRetriever, OllamaLLM
+
+    retriever = Neo4jVectorRetriever(
+        uri=args.neo4j_uri,
+        user=args.neo4j_user,
+        password=args.neo4j_password,
+        database=args.neo4j_database,
+        vector_index_name=args.neo4j_vector_index_name,
+        embedding_property=args.neo4j_embedding_property,
+        embedding_model=args.chunk_embedding_model,
+    )
+    llm = OllamaLLM(model=args.ollama_model, host=args.ollama_host)
+    answer = GraphRAGClient(retriever=retriever, llm=llm).ask(
+        args.question,
+        top_k=args.top_k,
+        graph_depth=args.graph_depth,
+        max_facts=args.max_facts,
+    )
+    payload = answer.model_dump_json(indent=2 if args.pretty else None)
+    sys.stdout.write(payload + "\n")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list and argv_list[0] == "ask":
+        return ask_main(argv_list[1:])
+
     args = parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level))
     neo4j_enabled = validate_neo4j_args(args)
@@ -2821,6 +3012,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             password=args.neo4j_password,
             database=args.neo4j_database,
             clean_document=args.neo4j_clean_document,
+            embed_chunks=args.neo4j_embed_chunks,
+            create_vector_index=args.neo4j_create_vector_index,
+            vector_index_name=args.neo4j_vector_index_name,
+            embedding_property=args.neo4j_embedding_property,
+            chunk_embedding_model=args.chunk_embedding_model,
         )
     return 0
 

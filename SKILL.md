@@ -28,6 +28,7 @@ It also supports:
 - CPU-aware execution modes
 - optional embedding-assisted linking
 - optional direct Neo4j export
+- optional GraphRAG question answering over Neo4j vector indexes and Ollama
 - multi-file corpus ingestion
 
 The public distribution name is `rapidGraph`.
@@ -48,6 +49,10 @@ The project currently has one main implementation module and a few wrappers:
   - schema generation
   - Neo4j export
   - CLI parsing and runtime entrypoint
+- [rapidgraph/graphrag.py](/Users/sadyanth/Desktop/RAG/ml_proj/rapidgraph/graphrag.py)
+  - Neo4j vector retrieval
+  - Ollama LLM provider
+  - GraphRAG answer orchestration
 - [rapidgraph/cli.py](/Users/sadyanth/Desktop/RAG/ml_proj/rapidgraph/cli.py)
   - thin lazy-import CLI wrapper
   - exists so `rapidgraph --help` does not eagerly import the heavy ML stack
@@ -108,6 +113,12 @@ With embedding support:
 pip install "rapidGraph[embeddings]"
 ```
 
+With GraphRAG support:
+
+```bash
+pip install "rapidGraph[graphrag]"
+```
+
 With development tooling:
 
 ```bash
@@ -117,7 +128,7 @@ pip install "rapidGraph[dev]"
 With everything:
 
 ```bash
-pip install "rapidGraph[neo4j,embeddings,dev]"
+pip install "rapidGraph[neo4j,embeddings,graphrag,dev]"
 ```
 
 ### Install from source
@@ -133,14 +144,15 @@ With extras:
 ```bash
 pip install ".[neo4j]"
 pip install ".[embeddings]"
+pip install ".[graphrag]"
 pip install ".[dev]"
-pip install ".[neo4j,embeddings,dev]"
+pip install ".[neo4j,embeddings,graphrag,dev]"
 ```
 
 ### Editable install for active development
 
 ```bash
-pip install -e ".[neo4j,embeddings,dev]"
+pip install -e ".[neo4j,embeddings,graphrag,dev]"
 ```
 
 ### TestPyPI install
@@ -158,6 +170,7 @@ pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://
 - The CLI command is `rapidgraph`.
 - Neo4j helper usage requires the `neo4j` extra or an equivalent direct install of the `neo4j` package.
 - Embedding-assisted linking requires the `sentence-transformers` dependency, exposed through the `embeddings` extra.
+- GraphRAG ask mode requires the `graphrag` extra, which includes Neo4j, sentence-transformers, and requests.
 
 ## Public Runtime Entry Points
 
@@ -190,6 +203,9 @@ Key public API functions and classes:
 - `RelationModel`
 - `SchemaEdgeModel`
 - `export_graph_to_neo4j(...)`
+- `Neo4jVectorRetriever`
+- `OllamaLLM`
+- `GraphRAGClient`
 
 ## Core Data Models
 
@@ -445,6 +461,29 @@ Important Neo4j model fact:
 - semantic relations like `IS_BASED_IN` or `USES` are stored as `r.relation` on `RELATES_TO`
 - Neo4j Browser therefore shows many `RELATES_TO` edges rather than separate relationship types per semantic relation
 
+### 11. GraphRAG ask layer
+
+GraphRAG implementation lives in:
+
+- `rapidgraph/graphrag.py`
+
+Key classes:
+
+- `Neo4jVectorRetriever`
+- `OllamaLLM`
+- `GraphRAGClient`
+- `RetrievedChunk`
+- `RetrievedFact`
+- `GraphRAGAnswer`
+
+Important behavior:
+
+- `Chunk` is the vector retrieval unit.
+- Neo4j vector indexes are the only HNSW backend in v1.
+- Ollama is the only LLM provider in v1.
+- The retriever queries `db.index.vector.queryNodes(...)`, expands to mentioned entities, and collects nearby `RELATES_TO` facts.
+- `rapidgraph ask` is routed before the extraction CLI parser, so extraction flags remain backward compatible.
+
 ## Public CLI Surface
 
 CLI parsing lives in:
@@ -478,7 +517,23 @@ Main supported flags:
 - `--neo4j-password`
 - `--neo4j-database`
 - `--neo4j-clean-document`
+- `--neo4j-embed-chunks`
+- `--neo4j-create-vector-index`
+- `--neo4j-vector-index-name`
+- `--neo4j-embedding-property`
+- `--chunk-embedding-model`
 - `--log-level`
+
+Ask-mode flags:
+
+- `rapidgraph ask`
+- `--question`
+- `--top-k`
+- `--graph-depth`
+- `--max-facts`
+- `--ollama-host`
+- `--ollama-model`
+- Neo4j connection and vector index flags
 
 Defaults worth remembering:
 
@@ -518,6 +573,7 @@ Optional extras:
 
 - `neo4j`
 - `embeddings`
+- `graphrag`
 - `dev`
 
 Publish workflows:
@@ -634,6 +690,22 @@ Be careful to preserve:
 - clean re-ingest behavior
 - compatibility with current graph shape
 
+### Extend GraphRAG ask mode
+
+Edit:
+
+- `rapidgraph/graphrag.py`
+- `ask_main` and `parse_ask_args` in `rapidgraph/core.py`
+- README GraphRAG section
+- tests in `tests/test_extract_graph.py`
+
+Preserve:
+
+- `rapidgraph ask` JSON output shape
+- lazy imports for optional dependencies
+- Neo4j vector index defaults
+- Ollama-only v1 provider scope unless explicitly requested
+
 ### Change JSON output contract
 
 Edit:
@@ -669,7 +741,22 @@ rapidgraph \
   --neo4j-user neo4j \
   --neo4j-password 12345678 \
   --neo4j-database neo4j \
-  --neo4j-clean-document
+  --neo4j-clean-document \
+  --neo4j-embed-chunks \
+  --neo4j-create-vector-index
+```
+
+### Ask the graph with Ollama
+
+```bash
+rapidgraph ask \
+  --question "What does the graph say about attention?" \
+  --neo4j-uri neo4j://127.0.0.1:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password 12345678 \
+  --neo4j-database neo4j \
+  --ollama-model llama3.2 \
+  --pretty
 ```
 
 ### Python API
@@ -680,6 +767,21 @@ from rapidgraph import build_default_extractor
 extractor = build_default_extractor(mode="balanced")
 result = extractor.extract("Google is based in California.")
 print(result.model_dump())
+```
+
+### Python GraphRAG API
+
+```python
+from rapidgraph import GraphRAGClient, Neo4jVectorRetriever, OllamaLLM
+
+retriever = Neo4jVectorRetriever(
+    uri="neo4j://127.0.0.1:7687",
+    user="neo4j",
+    password="12345678",
+)
+llm = OllamaLLM(model="llama3.2")
+answer = GraphRAGClient(retriever=retriever, llm=llm).ask("What does the graph say?")
+print(answer.model_dump())
 ```
 
 ## Important Project-Specific Gotchas
@@ -704,7 +806,11 @@ It has its own tests and should not be treated as the current packaged pipeline.
 
 This is intentional and must be understood before “fixing” it.
 
-### 6. Schema counts depend on final linked relations
+### 6. GraphRAG requires embedded chunks
+
+`rapidgraph ask` expects `Chunk` nodes to have embeddings and a Neo4j vector index. Users should export with `--neo4j-embed-chunks --neo4j-create-vector-index` before asking questions.
+
+### 7. Schema counts depend on final linked relations
 
 Users may ask why `potential_schema` is smaller than expected. The reason is usually:
 
@@ -714,7 +820,7 @@ Users may ask why `potential_schema` is smaller than expected. The reason is usu
 - relation linking failures
 - duplicate relations collapsing into one edge
 
-### 7. First-run model downloads are normal
+### 8. First-run model downloads are normal
 
 When testing in a clean environment, Hugging Face-backed model fetches may happen. That is not necessarily a bug.
 

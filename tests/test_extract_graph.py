@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import extract_graph
+from rapidgraph import graphrag
 from extract_graph import (
     Chunk,
     DocumentInput,
@@ -458,12 +459,34 @@ def test_cli_forwards_neo4j_flags(monkeypatch, capsys):
         "password": "secret",
         "database": "graphrag",
         "clean_document": True,
+        "embed_chunks": False,
+        "create_vector_index": False,
+        "vector_index_name": "rapidgraph_chunk_embedding",
+        "embedding_property": "embedding",
+        "chunk_embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     }
 
 
 def test_partial_neo4j_flags_raise_system_exit():
     with pytest.raises(SystemExit, match="Neo4j export requires"):
         extract_graph.main(["--text", "hello world", "--neo4j-uri", "neo4j://127.0.0.1:7687"])
+
+
+def test_vector_index_creation_requires_chunk_embedding_flag():
+    with pytest.raises(SystemExit, match="requires --neo4j-embed-chunks"):
+        extract_graph.main(
+            [
+                "--text",
+                "hello world",
+                "--neo4j-uri",
+                "neo4j://127.0.0.1:7687",
+                "--neo4j-user",
+                "neo4j",
+                "--neo4j-password",
+                "secret",
+                "--neo4j-create-vector-index",
+            ]
+        )
 
 
 def test_cli_reads_multiple_input_files_and_forwards_entity_scope(monkeypatch, capsys, tmp_path: Path):
@@ -1284,3 +1307,331 @@ def test_export_graph_to_neo4j_cleans_document_before_reingest():
     assert session.calls[4][0].strip() == extract_graph.NEO4J_DELETE_DOCUMENT_SUBGRAPH_QUERY.strip()
     assert session.calls[4][1] == {"document_id": "D1"}
     assert session.calls[5][0].strip() == extract_graph.NEO4J_DOCUMENT_QUERY.strip()
+
+
+class StaticEmbeddingBackend:
+    model_name = "static_embedding_backend"
+
+    def __init__(self, vector: list[float] | None = None):
+        self.vector = vector or [0.1, 0.2, 0.3]
+        self.calls: list[list[str]] = []
+
+    def embed_many(self, texts):
+        self.calls.append(list(texts))
+        return [self.vector for _ in texts]
+
+
+def build_minimal_graph_for_neo4j_export() -> GraphExtraction:
+    return GraphExtraction(
+        entities=[],
+        relations=[],
+        potential_schema=[],
+        expanded_schema=[],
+        documents=[
+            extract_graph.DocumentModel(
+                id="D1",
+                source="inline",
+                title="inline_text",
+                text_hash="abc",
+                char_count=31,
+            )
+        ],
+        chunks=[
+            extract_graph.ChunkModel(
+                id="D1:C0",
+                document_id="D1",
+                index=0,
+                text="Google is based in California.",
+                start=0,
+                end=31,
+                block_index=0,
+                overlap_sentences=0,
+            )
+        ],
+        relation_support=[],
+        meta=MetaModel(
+            entity_model="fake",
+            relation_model="fake",
+            entity_threshold=0.1,
+            relation_threshold=0.2,
+            chunk_count=1,
+            elapsed_seconds=0.01,
+        ),
+    )
+
+
+def test_export_graph_to_neo4j_embeds_chunks_and_creates_vector_index():
+    result = build_minimal_graph_for_neo4j_export()
+    fake_driver = FakeNeo4jDriver()
+    embedding_backend = StaticEmbeddingBackend([0.4, 0.5, 0.6])
+
+    extract_graph.export_graph_to_neo4j(
+        result,
+        uri="neo4j://127.0.0.1:7687",
+        user="neo4j",
+        password="secret",
+        database="graphrag",
+        embed_chunks=True,
+        create_vector_index=True,
+        vector_index_name="rapidgraph_chunk_embedding",
+        embedding_property="embedding",
+        chunk_embedding_model="fake-embedder",
+        embedding_backend=embedding_backend,
+        driver_factory=lambda uri, auth: fake_driver,
+    )
+
+    session = fake_driver.sessions[0]
+    assert embedding_backend.calls == [["Google is based in California."]]
+    assert len(session.calls) == 7
+    assert "CREATE VECTOR INDEX `rapidgraph_chunk_embedding`" in session.calls[5][0]
+    assert "c.`embedding`" in session.calls[5][0]
+    assert session.calls[5][1] == {"dimension": 3, "similarity_function": "cosine"}
+    assert "SET c.`embedding` = row.embedding" in session.calls[6][0]
+    assert session.calls[6][1]["rows"][0]["embedding"] == [0.4, 0.5, 0.6]
+    assert session.calls[6][1]["rows"][0]["embedding_model"] == "fake-embedder"
+
+
+def test_export_graph_to_neo4j_does_not_embed_chunks_by_default():
+    result = build_minimal_graph_for_neo4j_export()
+    fake_driver = FakeNeo4jDriver()
+    embedding_backend = StaticEmbeddingBackend()
+
+    extract_graph.export_graph_to_neo4j(
+        result,
+        uri="neo4j://127.0.0.1:7687",
+        user="neo4j",
+        password="secret",
+        database="graphrag",
+        embedding_backend=embedding_backend,
+        driver_factory=lambda uri, auth: fake_driver,
+    )
+
+    assert embedding_backend.calls == []
+    assert len(fake_driver.sessions[0].calls) == 5
+
+
+class FakeGraphRAGSession:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def run(self, query: str, **params):
+        self.calls.append((query, params))
+        if "db.index.vector.queryNodes" in query:
+            return [
+                {
+                    "id": "D1:C0",
+                    "document_id": "D1",
+                    "text": "Transformer uses attention.",
+                    "embedding_model": "fake-embedder",
+                    "score": 0.93,
+                    "source": "input.txt",
+                    "title": "input.txt",
+                }
+            ]
+        return [
+            {
+                "source_id": "E1",
+                "source_text": "Transformer",
+                "relation": "USES",
+                "target_id": "E2",
+                "target_text": "attention",
+                "evidence": "Transformer uses attention.",
+                "chunk_ids": ["D1:C0"],
+                "document_ids": ["D1"],
+                "confidence": 0.88,
+            }
+        ]
+
+
+class FakeGraphRAGDriver:
+    def __init__(self, session):
+        self.session_obj = session
+        self.closed = False
+
+    def session(self, *, database: str):
+        self.database = database
+        return self.session_obj
+
+    def close(self):
+        self.closed = True
+
+
+def test_neo4j_vector_retriever_queries_index_and_expands_facts():
+    session = FakeGraphRAGSession()
+    driver = FakeGraphRAGDriver(session)
+    backend = StaticEmbeddingBackend([0.1, 0.2])
+    retriever = graphrag.Neo4jVectorRetriever(
+        uri="neo4j://example",
+        user="neo4j",
+        password="secret",
+        database="neo4j",
+        embedding_model="fake-embedder",
+        embedding_backend=backend,
+        driver_factory=lambda uri, auth: driver,
+    )
+
+    chunks, facts, meta = retriever.retrieve(
+        "How does Transformer use attention?",
+        top_k=3,
+        graph_depth=1,
+        max_facts=7,
+    )
+
+    assert driver.closed is True
+    assert len(chunks) == 1
+    assert chunks[0].id == "D1:C0"
+    assert facts[0].relation == "USES"
+    assert meta["warnings"] == []
+    assert session.calls[0][1]["index_name"] == "rapidgraph_chunk_embedding"
+    assert session.calls[0][1]["top_k"] == 3
+    assert session.calls[1][1]["chunk_ids"] == ["D1:C0"]
+    assert session.calls[1][1]["max_facts"] == 7
+
+
+def test_graphrag_client_returns_empty_answer_when_no_chunks():
+    class EmptyRetriever:
+        def retrieve(self, question, *, top_k, graph_depth, max_facts):
+            return [], [], {"warnings": []}
+
+    class FailingLLM:
+        def generate(self, prompt):
+            raise AssertionError("LLM should not be called without context")
+
+    answer = graphrag.GraphRAGClient(retriever=EmptyRetriever(), llm=FailingLLM()).ask("What happened?")
+
+    assert answer.answer == "No relevant graph context was found for the question."
+    assert answer.sources == []
+    assert answer.facts == []
+
+
+def test_ollama_llm_sends_expected_payload_and_parses_response():
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "Answer text"}
+
+    class FakeHTTPClient:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, *, json, timeout):
+            self.calls.append((url, json, timeout))
+            return FakeResponse()
+
+    client = FakeHTTPClient()
+    llm = graphrag.OllamaLLM(model="llama3.2", host="http://ollama.local", http_client=client)
+
+    assert llm.generate("hello") == "Answer text"
+    assert client.calls[0][0] == "http://ollama.local/api/generate"
+    assert client.calls[0][1] == {"model": "llama3.2", "prompt": "hello", "stream": False}
+
+
+def test_ollama_llm_malformed_response_raises_clear_error():
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": "missing response"}
+
+    class FakeHTTPClient:
+        def post(self, url, *, json, timeout):
+            return FakeResponse()
+
+    llm = graphrag.OllamaLLM(model="llama3.2", http_client=FakeHTTPClient())
+
+    with pytest.raises(RuntimeError, match="string `response` field"):
+        llm.generate("hello")
+
+
+def test_cli_ask_parses_and_forwards_graphrag_flags(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    class FakeRetriever:
+        def __init__(self, **kwargs):
+            captured["retriever_kwargs"] = kwargs
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            captured["llm_kwargs"] = kwargs
+
+    class FakeClient:
+        def __init__(self, *, retriever, llm):
+            captured["retriever"] = retriever
+            captured["llm"] = llm
+
+        def ask(self, question, *, top_k, graph_depth, max_facts):
+            captured["ask"] = {
+                "question": question,
+                "top_k": top_k,
+                "graph_depth": graph_depth,
+                "max_facts": max_facts,
+            }
+            return graphrag.GraphRAGAnswer(
+                answer="answer",
+                sources=[],
+                facts=[],
+                meta={"ok": True},
+            )
+
+    monkeypatch.setattr(graphrag, "Neo4jVectorRetriever", FakeRetriever)
+    monkeypatch.setattr(graphrag, "OllamaLLM", FakeLLM)
+    monkeypatch.setattr(graphrag, "GraphRAGClient", FakeClient)
+
+    exit_code = extract_graph.main(
+        [
+            "ask",
+            "--question",
+            "What uses attention?",
+            "--neo4j-uri",
+            "neo4j://127.0.0.1:7687",
+            "--neo4j-user",
+            "neo4j",
+            "--neo4j-password",
+            "secret",
+            "--neo4j-database",
+            "graphrag",
+            "--neo4j-vector-index-name",
+            "my_index",
+            "--chunk-embedding-model",
+            "fake-embedder",
+            "--top-k",
+            "4",
+            "--graph-depth",
+            "1",
+            "--max-facts",
+            "9",
+            "--ollama-host",
+            "http://ollama.local",
+            "--ollama-model",
+            "llama3.2",
+            "--pretty",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["answer"] == "answer"
+    assert captured["retriever_kwargs"]["database"] == "graphrag"
+    assert captured["retriever_kwargs"]["vector_index_name"] == "my_index"
+    assert captured["retriever_kwargs"]["embedding_model"] == "fake-embedder"
+    assert captured["llm_kwargs"] == {"model": "llama3.2", "host": "http://ollama.local"}
+    assert captured["ask"] == {
+        "question": "What uses attention?",
+        "top_k": 4,
+        "graph_depth": 1,
+        "max_facts": 9,
+    }
+
+
+def test_cli_ask_requires_credentials():
+    with pytest.raises(SystemExit):
+        extract_graph.main(["ask", "--question", "hello", "--ollama-model", "llama3.2"])
